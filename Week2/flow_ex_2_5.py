@@ -252,8 +252,8 @@ if __name__ == "__main__":
         print(key, '=', value)
 
     # Generate the data
-    n_data = 10000000
-    toy = {'tg': ToyData.TwoGaussians, 'cb': ToyData.Chequerboard}[args.data]()
+    # n_data = 10000000
+    # toy = {'tg': ToyData.TwoGaussians, 'cb': ToyData.Chequerboard}[args.data]()
 
     train_dataset = datasets.MNIST('data/', 
                                 train=True, 
@@ -291,8 +291,8 @@ if __name__ == "__main__":
     (i + j) % 2 for i in range(28) for j in range(28)
     ], dtype=torch.float32)
     
-    num_transformations = 5
-    num_hidden = 8
+    num_transformations = 8
+    num_hidden = 256
 
     # Make a mask that is 1 for the first half of the features and 0 for the second half
     mask = torch.zeros((D,))
@@ -301,8 +301,8 @@ if __name__ == "__main__":
     for i in range(num_transformations):
         # mask = (1-mask) # Flip the mask
         # Random masking
-        # mask = torch.bernoulli(torch.full((D,), 0.5))
         mask = checker_mask if i % 2 == 0 else (1 - checker_mask)
+        # mask = torch.bernoulli(torch.full((D,), 0.5))
 
         scale_net = nn.Sequential(
             nn.Linear(D, num_hidden), 
@@ -342,16 +342,12 @@ if __name__ == "__main__":
         with torch.no_grad():
             samples = (model.sample((10000,))).cpu() 
 
-        # Plot the density of the toy data and the model samples
-        coordinates = [[[x,y] for x in np.linspace(*toy.xlim, 1000)] for y in np.linspace(*toy.ylim, 1000)]
-        prob = torch.exp(toy().log_prob(torch.tensor(coordinates)))
-
-        fig, ax = plt.subplots(1, 1, figsize=(7, 5))
-        im = ax.imshow(prob, extent=[toy.xlim[0], toy.xlim[1], toy.ylim[0], toy.ylim[1]], origin='lower', cmap='YlOrRd')
-        ax.scatter(samples[:, 0], samples[:, 1], s=1, c='black', alpha=0.5)
-        ax.set_xlim(toy.xlim)
-        ax.set_ylim(toy.ylim)
-        ax.set_aspect('equal')
-        fig.colorbar(im)
+        # Plot MNIST samples as an 8x8 grid
+        samples = samples[:64].clamp(0, 1).view(-1, 28, 28)
+        fig, axes = plt.subplots(8, 8, figsize=(8, 8))
+        for idx, ax in enumerate(axes.flat):
+            ax.imshow(samples[idx].numpy(), cmap='gray')
+            ax.axis('off')
+        plt.tight_layout()
         plt.savefig(args.samples)
         plt.close()
