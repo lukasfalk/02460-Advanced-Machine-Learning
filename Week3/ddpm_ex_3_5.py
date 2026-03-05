@@ -75,7 +75,7 @@ class DDPM(nn.Module):
             alpha_t = self.alpha[t].view(-1, 1)
             alpha_cumprod_t = self.alpha_cumprod[t].view(-1, 1)
             beta_t = self.beta[t].view(-1, 1)
-            epsilon_theta = self.network(x_t, torch.tensor([t], device=x_t.device).unsqueeze(0)/self.T)
+            epsilon_theta = self.network(x_t, torch.full((shape[0], 1), t/self.T, device=x_t.device))
             x_t = (1/torch.sqrt(alpha_t)) * (x_t - ((1 - alpha_t) / torch.sqrt(1 - alpha_cumprod_t)) * epsilon_theta) + torch.sqrt(beta_t) * eta
 
         return x_t
@@ -208,7 +208,7 @@ if __name__ == "__main__":
     network = FcNetwork(D, num_hidden=256)
 
     # U-Net
-    # network = Unet()
+    network = Unet()
 
     # Set the number of steps in the diffusion process
     T = 1000
@@ -229,30 +229,14 @@ if __name__ == "__main__":
         torch.save(model.state_dict(), args.model)
 
     elif args.mode == 'sample':
-        import matplotlib.pyplot as plt
-        import numpy as np
-
-        # Load the model
         model.load_state_dict(torch.load(args.model, map_location=torch.device(args.device)))
 
-        # Generate samples
         model.eval()
         with torch.no_grad():
-            samples = (model.sample((10000,D))).cpu() 
+            samples = model.sample((64, D)).cpu()
 
-        # Transform the samples back to the original space
-        samples = samples /2 + 0.5
+        # Transform back to [0,1]
+        samples = samples / 2 + 0.5
 
-        # Plot the density of the toy data and the model samples
-        coordinates = [[[x,y] for x in np.linspace(*toy.xlim, 1000)] for y in np.linspace(*toy.ylim, 1000)]
-        prob = torch.exp(toy().log_prob(torch.tensor(coordinates)))
-
-        fig, ax = plt.subplots(1, 1, figsize=(7, 5))
-        im = ax.imshow(prob, extent=[toy.xlim[0], toy.xlim[1], toy.ylim[0], toy.ylim[1]], origin='lower', cmap='YlOrRd')
-        ax.scatter(samples[:, 0], samples[:, 1], s=1, c='black', alpha=0.5)
-        ax.set_xlim(toy.xlim)
-        ax.set_ylim(toy.ylim)
-        ax.set_aspect('equal')
-        fig.colorbar(im)
-        plt.savefig(args.samples)
-        plt.close()
+        # Save as 8x8 grid
+        save_image(samples.view(64, 1, 28, 28), args.samples)
