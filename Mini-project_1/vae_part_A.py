@@ -13,6 +13,7 @@ from tqdm import tqdm
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 from flow_ex_2_5 import GaussianBase, MaskedCouplingLayer, Flow
+import numpy as np
 
 class GaussianPrior(nn.Module):
     def __init__(self, M):
@@ -303,7 +304,7 @@ def evaluate_elbo(model, data_loader, device):
             total_elbo += elbo.item()
     
     avg_elbo = total_elbo / len(data_loader)
-    print(f"ELBO evaluation: {avg_elbo:.4f}")
+    print(f"ELBO evaluation - {model.prior_name}: {avg_elbo:.4f}")
 
 def plot_samples(model, data_loader, device, M):
     """
@@ -342,6 +343,67 @@ def plot_samples(model, data_loader, device, M):
     plt.xlabel('z1' if M == 2 else 'PC1')
     plt.ylabel('z2' if M == 2 else 'PC2')
     plt.savefig(f'figures/aggregate_posterior_{model.prior_name}.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_prior_and_posterior(model, data_loader, device, M, n_samples=10000):
+    model.eval()
+    latents, labels = [], []
+    with torch.no_grad():
+        for x, y in data_loader:
+            x = x.to(device)
+            z = model.encoder(x).rsample()
+            latents.append(z.cpu())
+            labels.append(y)
+        prior_samples = model.prior.sample(torch.Size([n_samples])).cpu().numpy()
+
+    latents = torch.cat(latents, dim=0).numpy()
+    labels = torch.cat(labels, dim=0).numpy()
+
+    if M > 2:
+        pca = PCA(n_components=2)
+        pca.fit(latents)
+        latents = pca.transform(latents)
+        prior_samples = pca.transform(prior_samples)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Prior plot
+    ax1.scatter(prior_samples[:, 0], prior_samples[:, 1], s=2, alpha=0.3, c='steelblue')
+    ax1.set_title(f'Prior ({model.prior_name})')
+    ax1.set_xlabel('PC1')
+    ax1.set_ylabel('PC2')
+
+    # Aggregate posterior plot
+    scatter = ax2.scatter(latents[:, 0], latents[:, 1], c=labels, s=2, alpha=0.5, cmap='tab10')
+    plt.colorbar(scatter, ax=ax2, label='Digit Class')
+    ax2.set_title(f'Aggregate Posterior ({model.prior_name})')
+    ax2.set_xlabel('PC1')
+    ax2.set_ylabel('PC2')
+
+    # For MoG: overlay component means on both plots
+    if model.prior_name == 'MoG':
+        K = model.prior.K
+        component_samples = []
+        component_labels = []
+        with torch.no_grad():
+            for k in range(K):
+                # Sample from component k directly
+                mean = model.prior.means[k]
+                std = torch.exp(model.prior.log_stds[k])
+                samples_k = td.Independent(td.Normal(mean, std), 1).sample((n_samples // K,))
+                component_samples.append(samples_k.cpu().numpy())
+                component_labels.extend([k] * (n_samples // K))
+        
+        component_samples = np.concatenate(component_samples)
+        component_samples_2d = pca.transform(component_samples)
+        
+        scatter2 = ax1.scatter(component_samples_2d[:, 0], component_samples_2d[:, 1],
+                            c=component_labels, cmap='tab10', s=2, alpha=0.4)
+        plt.colorbar(scatter2, ax=ax1, label='Component')
+
+    plt.suptitle(f'Prior vs Aggregate Posterior — {model.prior_name} (M={M})', fontsize=13)
+    plt.tight_layout()
+    plt.savefig(f'./figures/prior_vs_posterior_{model.prior_name}.png', dpi=150, bbox_inches='tight')
     plt.close()
 
 if __name__ == "__main__":
@@ -422,18 +484,19 @@ if __name__ == "__main__":
             train(models[model], optimizer, mnist_train_loader, args.epochs, args.device)
 
             # Save model
-            torch.save(models[model].state_dict(), f'model_{model}.pt')#args.samples)
+            torch.save(models[model].state_dict(), f'models/model_{model}.pt')#args.samples)
 
     elif args.mode == 'sample':
         for model in models:
-            models[model].load_state_dict(torch.load(f'model_{model}.pt', map_location=torch.device(args.device)))
+            models[model].load_state_dict(torch.load(f'models/model_{model}.pt', map_location=torch.device(args.device)))
 
             # Test model
             evaluate_elbo(models[model], mnist_test_loader, args.device)
             plot_samples(models[model], mnist_test_loader, args.device, M)
+            plot_prior_and_posterior(models[model], mnist_test_loader, args.device, M)
 
             # Generate samples
             models[model].eval()
             with torch.no_grad():
                 samples = (models[model].sample(64)).cpu() 
-                save_image(samples.view(64, 1, 28, 28), f'model_{model}.png')#args.samples)
+                save_image(samples.view(64, 1, 28, 28), f'sample_gen/model_{model}.png')#args.samples)
