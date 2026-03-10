@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.distributions as td
 import torch.nn.functional as F
 from tqdm import tqdm
-from vae_part_A import GaussianPrior, VAE
+from vae_part_A import GaussianPrior, VAE, GaussianEncoder
 
 class BetaVAE(VAE):
     def __init__(self, encoder, decoder, prior, beta=1.0):
@@ -176,8 +176,10 @@ class FcNetwork(nn.Module):
             The number of hidden units in the network.
         """
         super(FcNetwork, self).__init__()
-        self.network = nn.Sequential(nn.Linear(input_dim+1, num_hidden), nn.ReLU(), 
-                                     nn.Linear(num_hidden, num_hidden), nn.ReLU(), 
+        self.network = nn.Sequential(nn.Linear(input_dim+1, num_hidden), 
+                                     nn.ReLU(), 
+                                     nn.Linear(num_hidden, num_hidden), 
+                                     nn.ReLU(), 
                                      nn.Linear(num_hidden, input_dim))
 
     def forward(self, x, t):
@@ -238,31 +240,72 @@ if __name__ == "__main__":
     D = next(iter(train_loader))[0].shape[1]
 
     # Define the network
-    network = FcNetwork(D, num_hidden=256)
+    Fc_network = FcNetwork(D, num_hidden=256)
 
     # U-Net
-    network = Unet()
+    unet_network = Unet()
+
+    # Beta-VAE
+    M = args.latent_dim # Latent dimension
+    prior_gaussian = GaussianPrior(M)
+
+    # Define encoder and decoder networks
+    encoder_net = nn.Sequential(
+        nn.Flatten(),
+        nn.Linear(784, 512),
+        nn.ReLU(),
+        nn.Linear(512, 512),
+        nn.ReLU(),
+        nn.Linear(512, M*2),
+    )
+
+    decoder_net = nn.Sequential(
+        nn.Linear(M, 512),
+        nn.ReLU(),
+        nn.Linear(512, 512),
+        nn.ReLU(),
+        nn.Linear(512, 784),
+        nn.Unflatten(-1, (28, 28))
+    )
+
+    # Define VAE models
+    # decoder = BernoulliDecoder(decoder_net)
+    encoder = GaussianEncoder(encoder_net)
+    model_gaussian = VAE(prior_gaussian, decoder, encoder).to(device)
 
     # Set the number of steps in the diffusion process
     T = 1000
 
     # Define model
-    model_DDPM = DDPM(network, T=T).to(args.device)
+    model_unet = DDPM(unet_network, T=T).to(args.device)
     model_BetaVAE = BetaVAE(None, None, GaussianPrior(M=D), beta=4.0).to(args.device)
+    model_DDPM_BVAE = DDPM(Fc_network, T=T).to(args.device)
 
-    models = {'ddpm': model_DDPM, 'beta_vae': model_BetaVAE}
+
+    models = {'unet': model_unet, 'beta_vae': model_BetaVAE, 'DDPM': model_DDPM_BVAE}
 
     # Choose mode to run
     if args.mode == 'train':
-        for model in models:
-            # Define optimizer
-            optimizer = torch.optim.Adam(models[model].parameters(), lr=args.lr)
+        # Define optimizer
+        optimizer = torch.optim.Adam(models['unet'].parameters(), lr=args.lr)
+        # Train model
+        train(models['unet'], optimizer, train_loader, args.epochs, args.device)
+        # Save model
+        torch.save(models['unet'].state_dict(), f'models/PartB/model_unet.pt')
 
-            # Train model
-            train(models[model], optimizer, train_loader, args.epochs, args.device)
+        # Define optimizer
+        optimizer = torch.optim.Adam(models['beta_vae'].parameters(), lr=args.lr)
+        # Train model
+        train(models['beta_vae'], optimizer, train_loader, args.epochs, args.device)
+        # Save model
+        torch.save(models['beta_vae'].state_dict(), f'models/PartB/model_beta_vae.pt')
 
-            # Save model
-            torch.save(models[model].state_dict(), f'models/PartB/model_{model}.pt')
+        # Define optimizer
+        optimizer = torch.optim.Adam(models['DDPM'].parameters(), lr=args.lr)
+        # Train model
+        train(models['DDPM'], optimizer, train_loader, args.epochs, args.device)
+        # Save model
+        torch.save(models['DDPM'].state_dict(), f'models/PartB/model_DDPM.pt')
 
     elif args.mode == 'sample':
         for model in models:
