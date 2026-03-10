@@ -6,7 +6,40 @@ import torch.nn as nn
 import torch.distributions as td
 import torch.nn.functional as F
 from tqdm import tqdm
+from vae_part_A import GaussianPrior, VAE
 
+class BetaVAE(VAE):
+    def __init__(self, encoder, decoder, prior, beta=1.0):
+        """
+        Initialize a Beta-VAE model.
+
+        Parameters:
+        encoder: [nn.Module]
+            The encoder network to use for the VAE.
+        decoder: [nn.Module]
+            The decoder network to use for the VAE.
+        prior: [GaussianPrior]
+            The prior distribution to use for the VAE.
+        beta: [float]
+            The weight of the KL divergence term in the ELBO (default: 1.0).
+        """
+        super(BetaVAE, self).__init__(encoder, decoder, prior)
+        self.beta = beta
+
+    def loss(self, x):
+        """
+        Evaluate the Beta-VAE loss on a batch of data.
+
+        Parameters:
+        x: [torch.Tensor]
+            A batch of data (x) of dimension `(batch_size, *)`.
+        Returns:
+        [torch.Tensor]
+            The loss for the batch.
+        """
+        recon_loss = F.mse_loss(self.decoder(self.encoder(x)[0]), x, reduction='sum') / x.shape[0]
+        kl_loss = td.kl_divergence(self.encoder(x)[1], self.prior).mean()
+        return recon_loss + self.beta * kl_loss
 
 class DDPM(nn.Module):
     def __init__(self, network, beta_1=1e-4, beta_T=2e-2, T=100):
@@ -165,7 +198,7 @@ if __name__ == "__main__":
     import torch.utils.data
     from torchvision import datasets, transforms
     from torchvision.utils import save_image
-    import ToyData as ToyData
+    # import ToyData as ToyData
     from unet import Unet
 
     # Parse arguments
@@ -214,29 +247,33 @@ if __name__ == "__main__":
     T = 1000
 
     # Define model
-    model = DDPM(network, T=T).to(args.device)
+    model_DDPM = DDPM(network, T=T).to(args.device)
+    model_BetaVAE = BetaVAE(None, None, GaussianPrior(M=D), beta=4.0).to(args.device)
 
+    models = {'ddpm': model_DDPM, 'beta_vae': model_BetaVAE}
 
     # Choose mode to run
     if args.mode == 'train':
-        # Define optimizer
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        for model in models:
+            # Define optimizer
+            optimizer = torch.optim.Adam(models[model].parameters(), lr=args.lr)
 
-        # Train model
-        train(model, optimizer, train_loader, args.epochs, args.device)
+            # Train model
+            train(models[model], optimizer, train_loader, args.epochs, args.device)
 
-        # Save model
-        torch.save(model.state_dict(), args.model)
+            # Save model
+            torch.save(models[model].state_dict(), f'models/PartB/model_{model}.pt')
 
     elif args.mode == 'sample':
-        model.load_state_dict(torch.load(args.model, map_location=torch.device(args.device)))
+        for model in models:
+            models[model].load_state_dict(torch.load(f'models/PartB/model_{model}.pt', map_location=torch.device(args.device)))
 
-        model.eval()
-        with torch.no_grad():
-            samples = model.sample((64, D)).cpu()
+            models[model].eval()
+            with torch.no_grad():
+                samples = models[model].sample((64, D)).cpu()
 
-        # Transform back to [0,1]
-        samples = samples / 2 + 0.5
+            # Transform back to [0,1]
+            samples = samples / 2 + 0.5
 
-        # Save as 8x8 grid
-        save_image(samples.view(64, 1, 28, 28), args.samples)
+            # Save as 8x8 grid
+            save_image(samples.view(64, 1, 28, 28), f'sample_gen/PartB/model_{model}.png')
