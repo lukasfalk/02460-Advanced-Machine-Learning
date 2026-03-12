@@ -32,7 +32,7 @@ class BetaVAE(VAE):
         beta: [float]
             The weight of the KL divergence term in the ELBO (default: 1.0).
         """
-        super(BetaVAE, self).__init__(encoder, decoder, prior)
+        super(BetaVAE, self).__init__(prior, decoder, encoder)
         self.beta = beta
 
     def loss(self, x):
@@ -46,9 +46,11 @@ class BetaVAE(VAE):
         [torch.Tensor]
             The loss for the batch.
         """
-        recon_loss = F.mse_loss(self.decoder(self.encoder(x)[0]), x, reduction='sum') / x.shape[0]
-        kl_loss = td.kl_divergence(self.encoder(x)[1], self.prior).mean()
-        return recon_loss + self.beta * kl_loss
+        q = self.encoder(x)
+        z = q.rsample()
+        log_px_z = self.decoder(z).log_prob(x.view(-1, 28, 28))
+        kl = td.kl_divergence(q, self.prior())
+        return -torch.mean(log_px_z - self.beta * kl)
 
 class DDPM(nn.Module):
     def __init__(self, network, beta_1=1e-4, beta_T=2e-2, T=100):
@@ -248,7 +250,7 @@ if __name__ == "__main__":
     test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, shuffle=True)
 
     # Get the dimension of the dataset
-    D = next(iter(train_loader))[0].shape[1]
+    D = 10 # next(iter(train_loader))[0].shape[1]
 
     # Define the network
     Fc_network = FcNetwork(D, num_hidden=256)
@@ -257,7 +259,7 @@ if __name__ == "__main__":
     unet_network = Unet()
 
     # Beta-VAE
-    M = args.latent_dim # Latent dimension
+    M = 10 # Latent dimension
     prior_gaussian = GaussianPrior(M)
 
     # Define encoder and decoder networks
@@ -293,7 +295,7 @@ if __name__ == "__main__":
     model_BetaVAE = BetaVAE(encoder, decoder, prior_gaussian, beta=4.0).to(args.device)
     model_DDPM_BVAE = DDPM(Fc_network, T=T).to(args.device)
 
-    models = {'unet': model_unet, 'beta_vae': model_BetaVAE, 'DDPM': model_DDPM_BVAE}
+    models = {'unet': model_unet, 'beta_vae': model_BetaVAE, 'latent': model_DDPM_BVAE}
 
     if args.mode == 'train':
         # Train U-Net DDPM on images directly
