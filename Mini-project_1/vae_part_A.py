@@ -206,23 +206,11 @@ class VAE(nn.Module):
         Parameters:
         x: [torch.Tensor]
         """
-        # 1. Get the approximate posterior distribution q(z|x)
-        q = self.encoder(x)
-        
-        # 2. Sample from the approximate posterior using the reparameterization trick
-        z = q.rsample()
-        
-        # 3. Calculate log p(x|z) - The reconstruction term
-        log_px_z = self.decoder(z).log_prob(x)
-        
-        # 4. Calculate log p(z) - The MoG prior term
-        log_pz = self.prior().log_prob(z)
-        
-        # 5. Calculate log q(z|x) - The entropy term
-        log_qz_x = q.log_prob(z)
-        
-        # Combined ELBO: log p(x|z) + log p(z) - log q(z|x)
-        # We take the mean over the batch dimension
+        q = self.encoder(x) # approximate posterior distribution q(z|x)
+        z = q.rsample() # reparameterization trick
+        log_px_z = self.decoder(z).log_prob(x) # reconstruction term log p(x|z)
+        log_pz = self.prior().log_prob(z) # MoG prior log p(z)
+        log_qz_x = q.log_prob(z) # entropy term log q(z|x)
         elbo = torch.mean(log_px_z + log_pz - log_qz_x, dim=0)
         return elbo
     

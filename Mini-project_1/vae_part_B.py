@@ -1,6 +1,8 @@
 # Code for DTU course 02460 (Advanced Machine Learning Spring) by Jes Frellsen, 2024
 # Version 1.0 (2024-02-11)
 
+import json
+
 import torch
 import torch.nn as nn
 import torch.distributions as td
@@ -211,6 +213,8 @@ if __name__ == "__main__":
     import torch.utils.data
     from torchvision import datasets, transforms
     from torchvision.utils import save_image
+    import time
+    import json
     # import ToyData as ToyData
     from unet import Unet
 
@@ -292,10 +296,12 @@ if __name__ == "__main__":
 
     # Define model
     model_unet = DDPM(unet_network, T=T).to(args.device)
-    model_BetaVAE = BetaVAE(encoder, decoder, prior_gaussian, beta=4.0).to(args.device)
+    model_BetaVAE = BetaVAE(encoder, decoder, prior_gaussian).to(args.device)
     model_DDPM_BVAE = DDPM(Fc_network, T=T).to(args.device)
+    
 
     models = {'unet': model_unet, 'beta_vae': model_BetaVAE, 'latent': model_DDPM_BVAE}
+    beta_values = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3]
 
     if args.mode == 'train':
         # Train U-Net DDPM on images directly
@@ -304,80 +310,63 @@ if __name__ == "__main__":
         torch.save(model_unet.state_dict(), 'models/PartB/model_unet.pt')
 
         # Train β-VAE
-        optimizer = torch.optim.Adam(model_BetaVAE.parameters(), lr=args.lr)
-        train(model_BetaVAE, optimizer, train_loader, args.epochs, args.device)
-        torch.save(model_BetaVAE.state_dict(), 'models/PartB/model_beta_vae.pt')
+        for beta in beta_values:
+            print(f"Training β-VAE with β={beta}")
+            model_BetaVAE.beta = beta
+            optimizer = torch.optim.Adam(model_BetaVAE.parameters(), lr=args.lr)
+            train(model_BetaVAE, optimizer, train_loader, args.epochs, args.device)
+            torch.save(model_BetaVAE.state_dict(), f'models/PartB/model_beta_{beta}_vae.pt')
 
-        # Train latent DDPM in β-VAE latent space
-        model_BetaVAE.eval()
-        optimizer = torch.optim.Adam(model_DDPM_BVAE.parameters(), lr=args.lr)
-        for epoch in range(args.epochs):
-            for x, _ in train_loader:
-                x = x.to(args.device)
-                with torch.no_grad():
-                    z = model_BetaVAE.encoder(x).mean  # encode to latent space
-                optimizer.zero_grad()
-                loss = model_DDPM_BVAE.loss(z)
-                loss.backward()
-                optimizer.step()
-        torch.save(model_DDPM_BVAE.state_dict(), 'models/PartB/model_latent_ddpm.pt')
+            # Train latent DDPM in β-VAE latent space
+            model_BetaVAE.eval()
+            
+            optimizer = torch.optim.Adam(model_DDPM_BVAE.parameters(), lr=args.lr)
+
+            for epoch in range(args.epochs):
+                for x, _ in train_loader:
+                    x = x.to(args.device)
+                    with torch.no_grad():
+                        z = model_BetaVAE.encoder(x).mean  # encode to latent space
+                    optimizer.zero_grad()
+                    loss = model_DDPM_BVAE.loss(z)
+                    loss.backward()
+                    optimizer.step()
+
+            torch.save(model_DDPM_BVAE.state_dict(), f'models/PartB/model_latent_ddpm_{beta}.pt')
 
     elif args.mode == 'sample':
         model_unet.load_state_dict(torch.load('models/PartB/model_unet.pt', map_location=args.device))
-        model_BetaVAE.load_state_dict(torch.load('models/PartB/model_beta_vae.pt', map_location=args.device))
-        model_DDPM_BVAE.load_state_dict(torch.load('models/PartB/model_latent_ddpm.pt', map_location=args.device))
-
         model_unet.eval()
-        model_BetaVAE.eval()
-        model_DDPM_BVAE.eval()
+        results = {}
 
         with torch.no_grad():
             # Sample from U-Net DDPM
-            samples_unet = model_unet.sample((64, D)).cpu() / 2 + 0.5
-            save_image(samples_unet.view(64, 1, 28, 28), 'sample_gen/PartB/model_unet.png')
+            start = time.time()
+            samples_unet = model_unet.sample((64, D))
+            torch.cuda.synchronize()
+            results['unet'] = {'samples_per_sec': 64 / (time.time() - start)}
+            save_image(samples_unet.cpu().view(64, 1, 28, 28) / 2 + 0.5, 'sample_gen/PartB/model_unet.png')
 
-            # Sample from latent DDPM + β-VAE decoder
-            z = model_DDPM_BVAE.sample((64, M))
-            samples_latent = model_BetaVAE.decoder(z).mean.cpu().clamp(0, 1)
-            save_image(samples_latent.view(64, 1, 28, 28), 'sample_gen/PartB/model_latent_ddpm.png')
+            for beta in beta_values:
+                model_BetaVAE.load_state_dict(torch.load(f'models/PartB/model_beta_{beta}_vae.pt', map_location=args.device))
+                model_DDPM_BVAE.load_state_dict(torch.load(f'models/PartB/model_latent_ddpm_{beta}.pt', map_location=args.device))
+                model_BetaVAE.eval()
+                model_DDPM_BVAE.eval()
 
-            # Sample from β-VAE directly
-            samples_vae = model_BetaVAE.sample(64).cpu().clamp(0, 1)
-            save_image(samples_vae.view(64, 1, 28, 28), 'sample_gen/PartB/model_beta_vae.png')
+                # Beta-VAE sampling + timing
+                start = time.time()
+                samples_vae = model_BetaVAE.sample(64)
+                torch.cuda.synchronize()
+                results[f'beta_vae_{beta}'] = {'samples_per_sec': 64 / (time.time() - start)}
+                save_image(samples_vae.cpu().clamp(0, 1).view(64, 1, 28, 28), f'sample_gen/PartB/model_beta_{beta}_vae.png')
 
-    # # Choose mode to run
-    # if args.mode == 'train':
-    #     # Define optimizer
-    #     optimizer = torch.optim.Adam(models['unet'].parameters(), lr=args.lr)
-    #     # Train model
-    #     train(models['unet'], optimizer, train_loader, args.epochs, args.device)
-    #     # Save model
-    #     torch.save(models['unet'].state_dict(), f'models/PartB/model_unet.pt')
+                # Latent DDPM sampling + timing
+                start = time.time()
+                z = model_DDPM_BVAE.sample((64, M))
+                samples_latent = model_BetaVAE.decoder(z).mean
+                torch.cuda.synchronize()
+                results[f'latent_ddpm_{beta}'] = {'samples_per_sec': 64 / (time.time() - start)}
+                save_image(samples_latent.cpu().clamp(0, 1).view(64, 1, 28, 28), f'sample_gen/PartB/model_latent_ddpm_{beta}.png')
 
-    #     # Define optimizer
-    #     optimizer = torch.optim.Adam(models['beta_vae'].parameters(), lr=args.lr)
-    #     # Train model
-    #     train(models['beta_vae'], optimizer, train_loader, args.epochs, args.device)
-    #     # Save model
-    #     torch.save(models['beta_vae'].state_dict(), f'models/PartB/model_beta_vae.pt')
-
-    #     # Define optimizer
-    #     optimizer = torch.optim.Adam(models['DDPM'].parameters(), lr=args.lr)
-    #     # Train model
-    #     train(models['DDPM'], optimizer, train_loader, args.epochs, args.device)
-    #     # Save model
-    #     torch.save(models['DDPM'].state_dict(), f'models/PartB/model_DDPM.pt')
-
-    # elif args.mode == 'sample':
-    #     for model in models:
-    #         models[model].load_state_dict(torch.load(f'models/PartB/model_{model}.pt', map_location=torch.device(args.device)))
-
-    #         models[model].eval()
-    #         with torch.no_grad():
-    #             samples = models[model].sample((64, D)).cpu()
-
-    #         # Transform back to [0,1]
-    #         samples = samples / 2 + 0.5
-
-    #         # Save as 8x8 grid
-    #         save_image(samples.view(64, 1, 28, 28), f'sample_gen/PartB/model_{model}.png')
+        with open('results/sampling_times.json', 'w') as f:
+            json.dump(results, f, indent=2)
