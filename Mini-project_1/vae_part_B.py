@@ -250,16 +250,16 @@ if __name__ == "__main__":
     test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, shuffle=True)
 
     # Get the dimension of the dataset
-    D = 10 # next(iter(train_loader))[0].shape[1]
+    D = 784 # next(iter(train_loader))[0].shape[1]
+    M = 10 # Latent dimension
 
     # Define the network
-    Fc_network = FcNetwork(D, num_hidden=256)
+    Fc_network = FcNetwork(M, num_hidden=256)
 
     # U-Net
     unet_network = Unet()
 
     # Beta-VAE
-    M = 10 # Latent dimension
     prior_gaussian = GaussianPrior(M)
 
     # Define encoder and decoder networks
