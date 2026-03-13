@@ -1,41 +1,41 @@
 {
   "unet": {
-    "samples_per_sec": 31.74030307512744
+    "samples_per_sec": 29.134031075740538
   },
   "beta_vae_1e-08": {
-    "samples_per_sec": 1430.2674523928772
+    "samples_per_sec": 1375.696115863002
   },
   "latent_ddpm_1e-08": {
-    "samples_per_sec": 503.1724468870786
+    "samples_per_sec": 488.38946644494337
   },
   "beta_vae_1e-07": {
-    "samples_per_sec": 170977.9974522293
+    "samples_per_sec": 161513.51143200963
   },
   "latent_ddpm_1e-07": {
-    "samples_per_sec": 521.5123726261596
+    "samples_per_sec": 509.79856880232154
   },
   "beta_vae_1e-06": {
-    "samples_per_sec": 177419.33641771314
+    "samples_per_sec": 169039.959697733
   },
   "latent_ddpm_1e-06": {
-    "samples_per_sec": 514.7105634032371
+    "samples_per_sec": 521.3918313120091
   },
   "beta_vae_1e-05": {
-    "samples_per_sec": 177068.24274406332
+    "samples_per_sec": 134150.65267366316
   },
   "latent_ddpm_1e-05": {
-    "samples_per_sec": 523.3578132615859
+    "samples_per_sec": 520.7556089261707
   },
   "beta_vae_0.0001": {
-    "samples_per_sec": 174762.66666666666
+    "samples_per_sec": 176370.2076215506
   },
   "latent_ddpm_0.0001": {
-    "samples_per_sec": 520.8930389240438
+    "samples_per_sec": 527.5501558465039
   },
   "beta_vae_0.001": {
-    "samples_per_sec": 174535.40702210664
+    "samples_per_sec": 176718.53587886767
   },
   "latent_ddpm_0.001": {
-    "samples_per_sec": 521.5143990068444
+    "samples_per_sec": 523.1252723438919
   }
 }

@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.distributions as td
 import torch.nn.functional as F
 from tqdm import tqdm
-from vae_part_A import GaussianPrior, VAE, GaussianEncoder
+from vae_part_A import GaussianPrior, VAE, GaussianEncoder, plot_prior_and_posterior
 
 class GaussianDecoder(nn.Module):
     def __init__(self, decoder_net):
@@ -20,33 +20,13 @@ class GaussianDecoder(nn.Module):
         return td.Independent(td.Normal(loc=mean, scale=0.1*torch.ones_like(mean)), 2)
 
 class BetaVAE(VAE):
-    def __init__(self, encoder, decoder, prior, beta=1.0):
-        """
-        Initialize a Beta-VAE model.
-
-        Parameters:
-        encoder: [nn.Module]
-            The encoder network to use for the VAE.
-        decoder: [nn.Module]
-            The decoder network to use for the VAE.
-        prior: [GaussianPrior]
-            The prior distribution to use for the VAE.
-        beta: [float]
-            The weight of the KL divergence term in the ELBO (default: 1.0).
-        """
+    def __init__(self, encoder: nn.Module, decoder: nn.Module, prior, beta=1.0):
         super(BetaVAE, self).__init__(prior, decoder, encoder)
         self.beta = beta
 
-    def loss(self, x):
+    def loss(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Evaluate the Beta-VAE loss on a batch of data.
-
-        Parameters:
-        x: [torch.Tensor]
-            A batch of data (x) of dimension `(batch_size, *)`.
-        Returns:
-        [torch.Tensor]
-            The loss for the batch.
+        Evaluate the Beta-VAE loss
         """
         q = self.encoder(x)
         z = q.rsample()
@@ -57,17 +37,10 @@ class BetaVAE(VAE):
 class DDPM(nn.Module):
     def __init__(self, network, beta_1=1e-4, beta_T=2e-2, T=100):
         """
-        Initialize a DDPM model.
-
-        Parameters:
-        network: [nn.Module]
-            The network to use for the diffusion process.
-        beta_1: [float]
-            The noise at the first step of the diffusion process.
-        beta_T: [float]
-            The noise at the last step of the diffusion process.
-        T: [int]
-            The number of steps in the diffusion process.
+        network: The network to use for the diffusion process.
+        beta_1: The noise at the first step of the diffusion process.
+        beta_T: The noise at the last step of the diffusion process.
+        T: The number of steps in the diffusion process.
         """
         super(DDPM, self).__init__()
         self.network = network
@@ -79,19 +52,10 @@ class DDPM(nn.Module):
         self.alpha = nn.Parameter(1 - self.beta, requires_grad=False)
         self.alpha_cumprod = nn.Parameter(self.alpha.cumprod(dim=0), requires_grad=False) # alpha_bar in the lecture notes
     
-    def negative_elbo(self, x):
+    def negative_elbo(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Evaluate the DDPM negative ELBO on a batch of data.
-
-        Parameters:
-        x: [torch.Tensor]
-            A batch of data (x) of dimension `(batch_size, *)`.
-        Returns:
-        [torch.Tensor]
-            The negative ELBO of the batch of dimension `(batch_size,)`.
+        Evaluate the DDPM negative ELBO (algorithm 1)
         """
-
-        ### Implement Algorithm 1 here ###
         t = torch.distributions.Categorical(logits=torch.zeros(self.T)).sample((x.shape[0],)).to(x.device)
         epsilon = torch.randn_like(x)
         alpha_t = self.alpha_cumprod[t].view(-1, 1)
@@ -100,19 +64,12 @@ class DDPM(nn.Module):
 
         return neg_elbo
 
-    def sample(self, shape):
+    def sample(self, shape: tuple) -> torch.Tensor:
         """
         Sample from the model.
-
-        Parameters:
-        shape: [tuple]
-            The shape of the samples to generate.
-        Returns:
-        [torch.Tensor]
-            The generated samples.
+        shape: The shape of the samples to generate.
         """
-        # Sample x_t for t=T (i.e., Gaussian noise)
-        x_t = torch.randn(shape).to(self.alpha.device)
+        x_t = torch.randn(shape).to(self.alpha.device) # Sample x_t for t=T (Gaussian noise)
 
         # Sample x_t given x_{t+1} until x_0 is sampled
         for t in range(self.T-1, -1, -1):
@@ -126,36 +83,15 @@ class DDPM(nn.Module):
 
         return x_t
 
-    def loss(self, x):
+    def loss(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Evaluate the DDPM loss on a batch of data.
-
-        Parameters:
-        x: [torch.Tensor]
-            A batch of data (x) of dimension `(batch_size, *)`.
-        Returns:
-        [torch.Tensor]
-            The loss for the batch.
+        Evaluate the DDPM loss.
+        Data (x) of dimension `(batch_size, *)`.
         """
         return self.negative_elbo(x).mean()
 
 
-def train(model, optimizer, data_loader, epochs, device):
-    """
-    Train a Flow model.
-
-    Parameters:
-    model: [Flow]
-       The model to train.
-    optimizer: [torch.optim.Optimizer]
-         The optimizer to use for training.
-    data_loader: [torch.utils.data.DataLoader]
-            The data loader to use for training.
-    epochs: [int]
-        Number of epochs to train for.
-    device: [torch.device]
-        The device to use for training.
-    """
+def train(model, optimizer: torch.optim.Optimizer, data_loader: torch.utils.data.DataLoader, epochs: int, device: torch.device):
     model.train()
 
     total_steps = len(data_loader)*epochs
@@ -178,16 +114,7 @@ def train(model, optimizer, data_loader, epochs, device):
 
 
 class FcNetwork(nn.Module):
-    def __init__(self, input_dim, num_hidden):
-        """
-        Initialize a fully connected network for the DDPM, where the forward function also take time as an argument.
-        
-        parameters:
-        input_dim: [int]
-            The dimension of the input data.
-        num_hidden: [int]
-            The number of hidden units in the network.
-        """
+    def __init__(self, input_dim: int, num_hidden: int):
         super(FcNetwork, self).__init__()
         self.network = nn.Sequential(nn.Linear(input_dim+1, num_hidden), 
                                      nn.ReLU(), 
@@ -198,24 +125,60 @@ class FcNetwork(nn.Module):
     def forward(self, x, t):
         """"
         Forward function for the network.
-        
-        parameters:
-        x: [torch.Tensor]
-            The input data of dimension `(batch_size, input_dim)`
-        t: [torch.Tensor]
-            The time steps to use for the forward pass of dimension `(batch_size, 1)`
+        x: Data of dimension `(batch_size, input_dim)`
+        t: Time steps to use for the forward pass of dimension `(batch_size, 1)`
         """
         x_t_cat = torch.cat([x, t], dim=1)
         return self.network(x_t_cat)
 
+def plot_latent_ddpm_vs_posterior(ddpm_model, vae_model, data_loader, device, M, beta, n_samples=10000):
+    vae_model.eval()
+    ddpm_model.eval()
+    latents, labels = [], []
+    with torch.no_grad():
+        for x, y in data_loader:
+            x = x.to(device)
+            z = vae_model.encoder(x).rsample()
+            latents.append(z.cpu())
+            labels.append(y)
+        ddpm_samples = ddpm_model.sample((n_samples, M)).cpu().numpy()
+
+    latents = torch.cat(latents, dim=0).numpy()
+    labels = torch.cat(labels, dim=0).numpy()
+
+    if M > 2:
+        pca = PCA(n_components=2)
+        pca.fit(latents)
+        latents_2d = pca.transform(latents)
+        ddpm_2d = pca.transform(ddpm_samples)
+    else:
+        latents_2d, ddpm_2d = latents, ddpm_samples
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    ax1.scatter(ddpm_2d[:, 0], ddpm_2d[:, 1], s=2, alpha=0.3, c='steelblue')
+    ax1.set_title(f'Latent DDPM distribution (beta={beta})')
+    ax1.set_xlabel('PC1'); ax1.set_ylabel('PC2')
+
+    scatter = ax2.scatter(latents_2d[:, 0], latents_2d[:, 1], c=labels, s=2, alpha=0.5, cmap='tab10')
+    plt.colorbar(scatter, ax=ax2, label='Digit Class')
+    ax2.set_title(f'Aggregate Posterior (beta={beta})')
+    ax2.set_xlabel('PC1'); ax2.set_ylabel('PC2')
+
+    plt.suptitle(f'Latent DDPM vs Aggregate Posterior (beta={beta}, M={M})', fontsize=13)
+    plt.tight_layout()
+    plt.savefig(f'./figures/latent_ddpm_vs_posterior_beta_{beta}.png', dpi=150, bbox_inches='tight')
+    plt.close()
 
 if __name__ == "__main__":
     import torch.utils.data
     from torchvision import datasets, transforms
     from torchvision.utils import save_image
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
+    import torch.distributions as td
     import time
     import json
-    # import ToyData as ToyData
     from unet import Unet
 
     # Parse arguments
@@ -239,10 +202,6 @@ if __name__ == "__main__":
 
     # Generate the data
     n_data = 10000000
-    # toy = {'tg': ToyData.TwoGaussians, 'cb': ToyData.Chequerboard}[args.data]()
-    # transform = lambda x: (x-0.5)*2.0
-    # train_loader = torch.utils.data.DataLoader(transform(toy().sample((n_data,))), batch_size=args.batch_size, shuffle=True)
-    # test_loader = torch.utils.data.DataLoader(transform(toy().sample((n_data,))), batch_size=args.batch_size, shuffle=True)
     transform = transforms.Compose([transforms.ToTensor(),
                                     transforms.Lambda(lambda x: x + torch.rand(x.shape)/255),
                                     transforms.Lambda(lambda x: (x-0.5)*2.0),
@@ -309,15 +268,15 @@ if __name__ == "__main__":
         train(model_unet, optimizer, train_loader, args.epochs, args.device)
         torch.save(model_unet.state_dict(), 'models/PartB/model_unet.pt')
 
-        # Train β-VAE
+        # Train beta-VAE and latent DDPM
         for beta in beta_values:
-            print(f"Training β-VAE with β={beta}")
+            print(f"Training beta-VAE with beta={beta}")
             model_BetaVAE.beta = beta
             optimizer = torch.optim.Adam(model_BetaVAE.parameters(), lr=args.lr)
             train(model_BetaVAE, optimizer, train_loader, args.epochs, args.device)
             torch.save(model_BetaVAE.state_dict(), f'models/PartB/model_beta_{beta}_vae.pt')
 
-            # Train latent DDPM in β-VAE latent space
+            # Train latent DDPM in beta-VAE latent space
             model_BetaVAE.eval()
             
             optimizer = torch.optim.Adam(model_DDPM_BVAE.parameters(), lr=args.lr)
@@ -367,6 +326,13 @@ if __name__ == "__main__":
                 torch.cuda.synchronize()
                 results[f'latent_ddpm_{beta}'] = {'samples_per_sec': 64 / (time.time() - start)}
                 save_image(samples_latent.cpu().clamp(0, 1).view(64, 1, 28, 28), f'sample_gen/PartB/model_latent_ddpm_{beta}.png')
+
+                if beta == 1e-6:
+                    # Plot beta-VAE aggregate posterior vs prior
+                    plot_prior_and_posterior(model_BetaVAE, test_loader, args.device, M)
+
+                    # Plot latent DDPM learned distribution vs beta-VAE aggregate posterior
+                    plot_latent_ddpm_vs_posterior(model_DDPM_BVAE, model_BetaVAE, test_loader, args.device, M, beta)
 
         with open('results/sampling_times.json', 'w') as f:
             json.dump(results, f, indent=2)

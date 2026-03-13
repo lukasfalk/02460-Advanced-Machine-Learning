@@ -16,13 +16,10 @@ from flow_ex_2_5 import GaussianBase, MaskedCouplingLayer, Flow
 import numpy as np
 
 class GaussianPrior(nn.Module):
-    def __init__(self, M):
+    def __init__(self, M: int):
         """
-        Define a Gaussian prior distribution with zero mean and unit variance.
-
-                Parameters:
-        M: [int] 
-           Dimension of the latent space.
+        Gaussian prior distribution with zero mean and unit variance.
+        M: Dimension of the latent space.
         """
         super(GaussianPrior, self).__init__()
         self.prior_name = 'gaussian'
@@ -34,9 +31,6 @@ class GaussianPrior(nn.Module):
         """
         Exercise 1.6
         Return the prior distribution.
-
-        Returns:
-        prior: [torch.distributions.Distribution]
         """
         return td.Independent(td.Normal(loc=self.mean, scale=self.std), 1)
     
@@ -44,15 +38,11 @@ class GaussianPrior(nn.Module):
         return self.forward().sample(sample_shape)
 
 class MoGPrior(nn.Module):
-    def __init__(self, M, K):
+    def __init__(self, M: int, K: int):
         """
         Define a Mixture of Gaussians prior distribution.
-
-                Parameters:
-        M: [int] 
-           Dimension of the latent space.
-        K: [int]
-           Number of mixture components.
+        M: Dimension of the latent space.
+        K: Number of mixture components.
         """
         super(MoGPrior, self).__init__()
         self.prior_name = 'MoG'
@@ -65,10 +55,8 @@ class MoGPrior(nn.Module):
 
     def forward(self):
         """
-        Return the prior distribution.
-
-        Returns:
         prior: [torch.distributions.Distribution]
+        Return: prior distribution.
         """
         component_dist = td.Independent(td.Normal(self.means, torch.exp(self.log_stds)), 1)
         mixture_dist = td.Categorical(logits=self.logits)
@@ -102,24 +90,15 @@ class FlowPrior(nn.Module):
 class GaussianEncoder(nn.Module):
     def __init__(self, encoder_net):
         """
-        Define a Gaussian encoder distribution based on a given encoder network.
-
-        Parameters:
-        encoder_net: [torch.nn.Module]             
-           The encoder network that takes as a tensor of dim `(batch_size,
-           feature_dim1, feature_dim2)` and output a tensor of dimension
-           `(batch_size, 2M)`, where M is the dimension of the latent space.
+        Gaussian encoder distribution based on encoder network.
         """
         super(GaussianEncoder, self).__init__()
         self.encoder_net = encoder_net
 
     def forward(self, x):
         """
-        Given a batch of data, return a Gaussian distribution over the latent space.
-
-        Parameters:
-        x: [torch.Tensor] 
-           A tensor of dimension `(batch_size, feature_dim1, feature_dim2)`
+        x: Tensor of dimension `(batch_size, feature_dim1, feature_dim2)`
+        Return: Gaussian distribution over the latent space.
         """
         mean, std = torch.chunk(self.encoder_net(x), 2, dim=-1)
         return td.Independent(td.Normal(loc=mean, scale=torch.exp(std)), 1)
@@ -129,12 +108,6 @@ class BernoulliDecoder(nn.Module):
     def __init__(self, decoder_net):
         """
         Define a Bernoulli decoder distribution based on a given decoder network.
-
-        Parameters: 
-        encoder_net: [torch.nn.Module]             
-           The decoder network that takes as a tensor of dim `(batch_size, M) as
-           input, where M is the dimension of the latent space, and outputs a
-           tensor of dimension (batch_size, feature_dim1, feature_dim2).
         """
         super(BernoulliDecoder, self).__init__()
         self.decoder_net = decoder_net
@@ -142,31 +115,15 @@ class BernoulliDecoder(nn.Module):
 
     def forward(self, z):
         """
-        Given a batch of latent variables, return a Bernoulli distribution over the data space.
-
-        Parameters:
-        z: [torch.Tensor] 
-           A tensor of dimension `(batch_size, M)`, where M is the dimension of the latent space.
+        z: Tensor of M-dimensional latent space `(batch_size, M)`.
+        Return a Bernoulli distribution over the data space.
         """
         logits = self.decoder_net(z)
         return td.Independent(td.Bernoulli(logits=logits), 2)
 
 
 class VAE(nn.Module):
-    """
-    Define a Variational Autoencoder (VAE) model.
-    """
     def __init__(self, prior, decoder, encoder):
-        """
-        Parameters:
-        prior: [torch.nn.Module] 
-           The prior distribution over the latent space.
-        decoder: [torch.nn.Module]
-              The decoder distribution over the data space.
-        encoder: [torch.nn.Module]
-                The encoder distribution over the latent space.
-        """
-            
         super(VAE, self).__init__()
         self.prior = prior
         self.decoder = decoder
@@ -199,12 +156,10 @@ class VAE(nn.Module):
             case _:
                 raise ValueError(f"Unknown prior type: {self.prior.prior_name}")
             
-    def elbo_GoM(self, x):
+    def elbo_GoM(self, x: torch.Tensor) -> torch.Tensor:
         """
         Exercise 1.6
         Compute the ELBO for the given batch of data using a Mixture of Gaussians prior.
-        Parameters:
-        x: [torch.Tensor]
         """
         q = self.encoder(x) # approximate posterior distribution q(z|x)
         z = q.rsample() # reparameterization trick
@@ -214,7 +169,7 @@ class VAE(nn.Module):
         elbo = torch.mean(log_px_z + log_pz - log_qz_x, dim=0)
         return elbo
     
-    def elbo_flow(self, x):
+    def elbo_flow(self, x: torch.Tensor) -> torch.Tensor:
         q = self.encoder(x)
         z = q.rsample()
         log_px_z = self.decoder(z).log_prob(x)
@@ -225,10 +180,7 @@ class VAE(nn.Module):
     def sample(self, n_samples=1):
         """
         Sample from the model.
-        
-        Parameters:
-        n_samples: [int]
-           Number of samples to generate.
+        Number of samples to generate.
         """
         z = self.prior.sample(torch.Size([n_samples]))
         return self.decoder(z).sample()
@@ -236,30 +188,12 @@ class VAE(nn.Module):
     def forward(self, x):
         """
         Compute the negative ELBO for the given batch of data.
-
-        Parameters:
-        x: [torch.Tensor] 
-           A tensor of dimension `(batch_size, feature_dim1, feature_dim2)`
+        x: Tensor of dimension `(batch_size, feature_dim1, feature_dim2)`
         """
         return -self.elbo(x)
 
 
 def train(model, optimizer, data_loader, epochs, device):
-    """
-    Train a VAE model.
-
-    Parameters:
-    model: [VAE]
-       The VAE model to train.
-    optimizer: [torch.optim.Optimizer]
-         The optimizer to use for training.
-    data_loader: [torch.utils.data.DataLoader]
-            The data loader to use for training.
-    epochs: [int]
-        Number of epochs to train for.
-    device: [torch.device]
-        The device to use for training.
-    """
     model.train()
 
     total_steps = len(data_loader)*epochs
@@ -297,11 +231,6 @@ def evaluate_elbo(model, data_loader, device):
 def plot_samples(model, data_loader, device, M):
     """
     Exercise 1.5
-    Plot samples from the approximate posterior and colour them by their correct class
-    label for each datapoint in the test set (i.e., samples from the aggregate posterior).
-    Implement it such that you, for latent dimensions larger than two, M > 2, do
-    PCA and project the sample onto the first two principal components (e.g., using
-    scikit-learn).
     """
     model.eval()
     latents = []
@@ -368,7 +297,7 @@ def plot_prior_and_posterior(model, data_loader, device, M, n_samples=10000):
     ax2.set_xlabel('PC1')
     ax2.set_ylabel('PC2')
 
-    # For MoG: overlay component means on both plots
+    # Overlay component means on both plots for MoG
     if model.prior_name == 'MoG':
         K = model.prior.K
         component_samples = []
