@@ -239,6 +239,9 @@ class PLcurve:
         plt.plot(c[:, 0], c[:, 1])
 
 def curve_energy(metric, curve):
+    '''
+    Default function from week 7
+    '''
     G = metric(curve[:-1])  # (N-1)xDxD
     delta = curve[1:] - curve[:-1]  # (N-1)xD
     # Batch matrix multiplication: (N-1, D, D) x (N-1, D, 1) -> (N-1, D)
@@ -247,6 +250,9 @@ def curve_energy(metric, curve):
     return energy
 
 def connecting_geodesic(metric, curve):
+    '''
+    Default function from week 7
+    '''
     opt = optim.LBFGS([curve.params], lr=0.5)
     
     def closure():
@@ -261,14 +267,10 @@ def connecting_geodesic(metric, curve):
 
 def pullback_metric(z, decoder):
     """
-    Compute the pull-back metric G(z) = J_f(z)^T J_f(z) for a batch of latent points.
+    Compute the pull-back metric G(z) = J_f(z).T @ J_f(z) for latent points.
     
-    Parameters:
-    z: [torch.Tensor] shape (N, 2)
-    decoder: the decoder network mapping z -> image means, shape (1, 28, 28)
-    
-    Returns:
-    G: [torch.Tensor] shape (N, 2, 2)
+    z: Tensor (N, 2). Inputs and the specified 2 dimensions.
+    G: Tensor (N, 2, 2)
     """
     def f(z_single):
         return decoder(z_single.unsqueeze(0)).flatten()  # (784,)
@@ -278,20 +280,22 @@ def pullback_metric(z, decoder):
     return G
 
 def ensemble_curve_energy(decoders, curve, n_samples=10):
-    energy = 0.0
+    '''
+    Model-average curve energy. Eq. 1 from project description
+    '''
+    energy = 0
     M = len(decoders)
     for _ in range(n_samples):
         l = torch.randint(M, (1,)).item()
         k = torch.randint(M, (1,)).item()
-        # Use decoder_net directly to get means, avoids GaussianDecoder distribution
         f_l = decoders[l].decoder_net(curve[:-1])  # (N-1, 1, 28, 28)
         f_k = decoders[k].decoder_net(curve[1:])   # (N-1, 1, 28, 28)
         diff = (f_l - f_k).flatten(1)              # (N-1, 784)
         energy = energy + torch.sum(diff**2)
     return energy / n_samples
 
-def connecting_geodesic_ensemble(decoders, curve, n_samples=5):
-    opt = optim.LBFGS([curve.params], lr=0.01, max_iter=20,
+def connecting_ensemble_geodesic(decoders, curve, n_samples=5):
+    opt = optim.LBFGS([curve.params], lr=0.001, max_iter=20,
                       tolerance_grad=1e-3, tolerance_change=1e-4,
                       line_search_fn='strong_wolfe')
     
@@ -302,8 +306,24 @@ def connecting_geodesic_ensemble(decoders, curve, n_samples=5):
         torch.nn.utils.clip_grad_norm_([curve.params], max_norm=1.0)
         return energy
 
-    for i in range(20):
+    for _ in range(20):
         opt.step(closure)
+
+def CoV(dist_key, all_distances):
+    '''
+    CoV from Eq, 2 in project description
+    '''
+    covs = []
+    for decoder_number in range(1, 4):
+        d = all_distances[decoder_number][dist_key]  # (reruns, curves)
+        cov_per_pair = []
+        for k in range(d.shape[1]):
+            col = d[:, k]
+            col = col[~torch.isnan(col)]  # drop NaN reruns for this pair
+            if len(col) > 1:
+                cov_per_pair.append((col.std() / col.mean()).item())
+        covs.append(sum(cov_per_pair) / len(cov_per_pair))
+    return covs
 
 def train(model, optimizer, data_loader, epochs, device):
     """
@@ -369,7 +389,7 @@ if __name__ == "__main__":
         "mode",
         type=str,
         default="train",
-        choices=["train", "sample", "eval", "geodesics", "train_ensemble"],
+        choices=["train", "sample", "eval", "geodesics", "train_ensemble", "geodesics_ensemble"],
         help="what to do when running the script (default: %(default)s)",
     )
     parser.add_argument(
@@ -487,6 +507,7 @@ if __name__ == "__main__":
 
     # Define prior distribution
     M = args.latent_dim
+    seed = 42
 
     def new_encoder():
         encoder_net = nn.Sequential(
@@ -582,7 +603,7 @@ if __name__ == "__main__":
         print("Print mean test elbo:", mean_elbo)
 
     elif args.mode == "geodesics":
-        print("Plotting geodesics in the latent space...")
+        print("Plotting geodesics in the latent space")
         model = VAE(
             GaussianPrior(M),
             GaussianDecoder(new_decoder()),
@@ -591,8 +612,8 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.experiment_folder + "/model.pt"))
         model.eval()
 
-        print("Encoding test data...")
-        all_z = []
+        print("Encoding test data")
+        all_z      = []
         all_labels = []
         with torch.no_grad():
             for x, y in mnist_test_loader:
@@ -600,60 +621,62 @@ if __name__ == "__main__":
                 z = model.encoder(x).mean
                 all_z.append(z)
                 all_labels.append(y)
-        all_z = torch.cat(all_z, dim=0)        # (N, 2)
+        all_z = torch.cat(all_z, dim=0) # (N, 2)
         all_labels = torch.cat(all_labels, dim=0)
 
         # Define the metric as a closure over the trained decoder
-        print("Defining pull-back metric...")
+        print("Defining pull-back metric")
         decoder_net = model.decoder.decoder_net
         metric = lambda z: pullback_metric(z, decoder_net)
 
-        # Plot latent space colored by class
-        print("Plotting latent space and geodesics...")
+        # Plot latent space
+        print("Plotting latent space and geodesics")
         plt.figure(figsize=(8, 8))
-        for cls in range(num_classes):
-            mask = all_labels == cls
-            plt.scatter(all_z[mask, 0].cpu(), all_z[mask, 1].cpu(), s=5, label=str(cls))
+        for class_label in range(num_classes):
+            mask = all_labels == class_label
+            plt.scatter(all_z[mask, 0].cpu(), all_z[mask, 1].cpu(), s=5, label=str(class_label))
 
         # Compute and plot geodesics between random pairs
-        print("Computing geodesics...")
-        torch.manual_seed(42)
+        print("Computing geodesics")
+        torch.manual_seed(seed)
         indices = torch.randperm(len(all_z))[:args.num_curves * 2]
         for k in tqdm(range(args.num_curves), desc="Computing geodesics"):
-            z0 = all_z[indices[2 * k]].detach()
-            z1 = all_z[indices[2 * k + 1]].detach()
+            z0 = all_z[indices[2*k]].detach()
+            z1 = all_z[indices[2*k + 1]].detach()
             curve = PLcurve(z0, z1, args.num_t)
             connecting_geodesic(metric, curve)
             curve.plot()
 
         plt.legend()
-        plt.title("Latent space with pull-back geodesics")
+        plt.title("Latent space, pull-back geodesics")
         plt.savefig("geodesics.png", dpi=150)
         plt.show()
-        print("Saved geodesics.png")
 
     elif args.mode == "train_ensemble":
         all_distances = {}  # keyed by num_decoders
         
-        # Fix the same test point pairs across ALL reruns
+        # Same test point pairs across all reruns
         test_batch = next(iter(mnist_test_loader))[0].to(device)
-        torch.manual_seed(0)  # critical - same pairs every time
+        torch.manual_seed(0)
         pair_indices = torch.randperm(len(test_batch))[:args.num_curves * 2]
         
-        for num_dec in [1, 2, 3]:
-            geodesic_dists = []  # shape will be (num_reruns, num_curves)
+        for decoder_number in range(1, 4):  # [1, 2, 3]
+            geodesic_dists  = []
             euclidean_dists = []
             
             for rerun in range(args.num_reruns):
-                # Train a fresh ensemble VAE
                 model = EnsembleVAE(
                     GaussianPrior(M),
-                    [GaussianDecoder(new_decoder()) for _ in range(num_dec)],
+                    [GaussianDecoder(new_decoder()) for _ in range(decoder_number)],
                     GaussianEncoder(new_encoder()),
                 ).to(device)
                 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-                train(model, optimizer, mnist_train_loader, 
-                    args.epochs_per_decoder, device)
+                train(model, 
+                      optimizer, 
+                      mnist_train_loader, 
+                      args.epochs_per_decoder, 
+                      device
+                    )
                 model.eval()
                 
                 # Get latent means for the fixed test pairs
@@ -664,7 +687,7 @@ if __name__ == "__main__":
                 run_euc_dists = []
                 for k in range(args.num_curves):
                     z0 = z[pair_indices[2*k]].detach()
-                    z1 = z[pair_indices[2*k+1]].detach()
+                    z1 = z[pair_indices[2*k + 1]].detach()
                     
                     # Euclidean distance
                     euc = torch.norm(z0 - z1).item()
@@ -673,37 +696,94 @@ if __name__ == "__main__":
                     # Geodesic distance
                     curve = PLcurve(z0, z1, args.num_t)
                     energy = lambda c: ensemble_curve_energy(
-                        model.decoders, c, n_samples=5
+                        model.decoders, 
+                        c, 
+                        n_samples=5
                     )
-                    connecting_geodesic_ensemble(model.decoders, curve)
-                    geo = torch.sqrt(
-                        ensemble_curve_energy(model.decoders, 
-                                            curve.points().detach(), n_samples=20)
+                    connecting_ensemble_geodesic(model.decoders, curve)
+                    geodesic_dist = torch.sqrt(
+                        ensemble_curve_energy(
+                            model.decoders, 
+                            curve.points().detach(), 
+                            n_samples=20
+                        )
                     ).item()
-                    run_geo_dists.append(geo)
+                    run_geo_dists.append(geodesic_dist)
                 
                 geodesic_dists.append(run_geo_dists)
                 euclidean_dists.append(run_euc_dists)
-                print(f"num_dec={num_dec}, rerun={rerun} done")
+                print(f"num_dec={decoder_number}, rerun={rerun} done")
             
-            all_distances[num_dec] = {
+            all_distances[decoder_number] = {
                 'geodesic': torch.tensor(geodesic_dists),   # (reruns, curves)
                 'euclidean': torch.tensor(euclidean_dists),
             }
         
-        # Compute and plot CoV
+        # Plot CoV
         plt.figure()
         for label, dist_key in [('Geodesic', 'geodesic'), 
                                 ('Euclidean', 'euclidean')]:
-            covs = []
-            for num_dec in [1, 2, 3]:
-                d = all_distances[num_dec][dist_key]  # (reruns, curves)
-                # CoV per pair, then average across pairs
-                cov_per_pair = d.std(dim=0) / d.mean(dim=0)  # (curves,)
-                covs.append(cov_per_pair.mean().item())
+            covs = CoV(dist_key, all_distances)
             plt.plot([1, 2, 3], covs, marker='o', label=label)
-        
         plt.xlabel('Number of ensemble decoders')
         plt.ylabel('Mean CoV')
         plt.legend()
         plt.savefig('cov.png', dpi=150)
+
+    elif args.mode == "geodesics_ensemble":
+        os.makedirs(args.experiment_folder, exist_ok=True)
+        model = EnsembleVAE(
+            GaussianPrior(M),
+            [GaussianDecoder(new_decoder()) for _ in range(args.num_decoders)],
+            GaussianEncoder(new_encoder()),
+        ).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        train(model, 
+              optimizer, 
+              mnist_train_loader, 
+              args.epochs_per_decoder, 
+              device
+            )
+        model.eval()
+
+        # Save models
+        torch.save(model.encoder.state_dict(),
+                f"{args.experiment_folder}/ensemble_encoder.pt")
+        for i, dec in enumerate(model.decoders):
+            torch.save(dec.state_dict(),
+                    f"{args.experiment_folder}/ensemble_decoder_{i}.pt")
+
+        # Encode test data
+        all_z       = []
+        all_labels  = []
+        with torch.no_grad():
+            for x, y in mnist_test_loader:
+                z = model.encoder(x.to(device)).mean
+                all_z.append(z)
+                all_labels.append(y)
+        all_z = torch.cat(all_z, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+
+        # Plot latent space
+        plt.figure(figsize=(8, 8))
+        for class_label in range(num_classes):
+            mask = all_labels == class_label
+            plt.scatter(all_z[mask, 0].cpu(), 
+                        all_z[mask, 1].cpu(), 
+                        s=5, 
+                        label=str(class_label))
+
+        # Compute and plot geodesics
+        torch.manual_seed(seed)
+        indices = torch.randperm(len(all_z))[:args.num_curves * 2]
+        for k in tqdm(range(args.num_curves), desc="Computing geodesics"):
+            z0 = all_z[indices[2*k]].detach()
+            z1 = all_z[indices[2*k + 1]].detach()
+            curve = PLcurve(z0, z1, args.num_t)
+            connecting_ensemble_geodesic(model.decoders, curve)
+            curve.plot()
+
+        plt.legend()
+        plt.title("Latent space, ensemble geodesics")
+        plt.savefig("geodesics_ensemble.png", dpi=150)
+        plt.show()
