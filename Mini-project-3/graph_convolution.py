@@ -5,6 +5,19 @@ from torch_geometric.datasets import TUDataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import to_dense_adj, to_dense_batch
 import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.distributions as td
+import torch.utils.data
+from tqdm import tqdm
+from copy import deepcopy
+import os
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.optim as optim
+import networkx as nx
 
 # %% Interactive plots
 plt.ion() # Enable interactive plotting
@@ -29,6 +42,16 @@ train_dataset, validation_dataset, test_dataset = random_split(dataset, (100, 44
 train_loader = DataLoader(train_dataset, batch_size=100)
 validation_loader = DataLoader(validation_dataset, batch_size=44)
 test_loader = DataLoader(test_dataset, batch_size=44)
+
+def erdos_renyi(train_dataset):
+    # 1. Sampling with empirical distribution
+    edge_counts = torch.zeros((node_feature_dim, node_feature_dim), device=device)
+
+    # 2. Compute link probabilities
+
+
+    # 3. Sample a random graph
+
 
 # %% Define a simple graph convolution for graph classification
 class SimpleGraphConv(torch.nn.Module):
@@ -103,7 +126,57 @@ class SimpleGraphConv(torch.nn.Module):
         # Output
         out = self.output_net(graph_state).flatten()
         return out
-    
+
+class GaussianPrior(nn.Module):
+    def __init__(self, M):
+        """
+        Define a Gaussian prior distribution with zero mean and unit variance.
+
+                Parameters:
+        M: [int]
+           Dimension of the latent space.
+        """
+        super(GaussianPrior, self).__init__()
+        self.M = M
+        self.mean = nn.Parameter(torch.zeros(self.M), requires_grad=False)
+        self.std = nn.Parameter(torch.ones(self.M), requires_grad=False)
+
+    def forward(self):
+        """
+        Return the prior distribution.
+
+        Returns:
+        prior: [torch.distributions.Distribution]
+        """
+        return td.Independent(td.Normal(loc=self.mean, scale=self.std), 1)
+
+
+class GaussianEncoder(nn.Module):
+    def __init__(self, encoder_net):
+        """
+        Define a Gaussian encoder distribution based on a given encoder network.
+
+        Parameters:
+        encoder_net: [torch.nn.Module]
+           The encoder network that takes as a tensor of dim `(batch_size,
+           feature_dim1, feature_dim2)` and output a tensor of dimension
+           `(batch_size, 2M)`, where M is the dimension of the latent space.
+        """
+        super(GaussianEncoder, self).__init__()
+        self.encoder_net = encoder_net
+
+    def forward(self, x):
+        """
+        Given a batch of data, return a Gaussian distribution over the latent space.
+
+        Parameters:
+        x: [torch.Tensor]
+           A tensor of dimension `(batch_size, feature_dim1, feature_dim2)`
+        """
+        mean, std = torch.chunk(self.encoder_net(x), 2, dim=-1)
+        return td.Independent(td.Normal(loc=mean, scale=torch.exp(std)), 1)
+
+
 # %% Set up the model, loss, and optimizer etc.
 # Instantiate the model
 filter_length = 3
