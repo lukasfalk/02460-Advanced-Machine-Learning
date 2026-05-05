@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 import networkx as nx
+import random
 
 # %% Interactive plots
 plt.ion() # Enable interactive plotting
@@ -42,16 +43,6 @@ train_dataset, validation_dataset, test_dataset = random_split(dataset, (100, 44
 train_loader = DataLoader(train_dataset, batch_size=100)
 validation_loader = DataLoader(validation_dataset, batch_size=44)
 test_loader = DataLoader(test_dataset, batch_size=44)
-
-def erdos_renyi(train_dataset):
-    # 1. Sampling with empirical distribution
-    edge_counts = torch.zeros((node_feature_dim, node_feature_dim), device=device)
-
-    # 2. Compute link probabilities
-
-
-    # 3. Sample a random graph
-
 
 # %% Define a simple graph convolution for graph classification
 class SimpleGraphConv(torch.nn.Module):
@@ -175,6 +166,22 @@ class GaussianEncoder(nn.Module):
         """
         mean, std = torch.chunk(self.encoder_net(x), 2, dim=-1)
         return td.Independent(td.Normal(loc=mean, scale=torch.exp(std)), 1)
+
+def erdos_renyi(train_dataset):
+    # 1. Sampling with empirical distribution
+    node_counts = [graph.num_nodes for graph in train_dataset]
+    N = random.choice(node_counts)
+
+    # 2. Compute link probabilities
+    graphs_with_N_nodes = [graph.num_edges // 2 for graph in train_dataset if graph.num_nodes == N]
+    edge_counts = sum([graph.num_edges for graph in graphs_with_N_nodes])
+    total_possible_edges = N * (N - 1) // 2
+    r = edge_counts / total_possible_edges
+
+    # 3. Sample a random graph
+    G = nx.erdos_renyi_graph(n=N, p=r)
+
+    return G
 
 
 # %% Set up the model, loss, and optimizer etc.
