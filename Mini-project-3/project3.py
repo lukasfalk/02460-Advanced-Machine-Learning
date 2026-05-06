@@ -169,7 +169,7 @@ class GaussianEncoder(nn.Module):
         super(GaussianEncoder, self).__init__()
         self.encoder_net = encoder_net
 
-    def forward(self, x):
+    def forward(self, x, edge_index, batch, A):
         """
         Given a batch of data, return a Gaussian distribution over the latent space.
 
@@ -202,18 +202,18 @@ class VAE(torch.nn.Module):
     def __init__(self, encoder_net, decoder_net, prior):
         super(VAE, self).__init__()
         self.encoder = GaussianEncoder(encoder_net)
-        self.decoder = GaussianDecoder(decoder_net)
+        self.decoder = BernoulliDecoder(decoder_net)
         self.prior = prior
 
-    def forward(self, x):
-        q = self.encoder(x)
+    def forward(self, x, edge_index, batch, A):
+        q = self.encoder(x, edge_index, batch, A)
         z = q.rsample()
         p = self.decoder(z)
         return p, q, self.prior()
     
     def ELBO(self, x, edge_index, batch, A):
-        p, q, prior = self.forward(x)
-        log_pxz = p.log_prob(x)
+        p, q, prior = self.forward(x, edge_index, batch, A)
+        log_pxz = p.log_prob(A)
         kl_qp = td.kl_divergence(q, prior)
         elbo = log_pxz - kl_qp
         return elbo.mean()
