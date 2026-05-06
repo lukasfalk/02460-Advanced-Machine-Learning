@@ -3,22 +3,11 @@ import torch
 from torch.utils.data import random_split
 from torch_geometric.datasets import TUDataset
 from torch_geometric.loader import DataLoader
-from torch_geometric.utils import to_dense_adj, to_dense_batch
 import matplotlib.pyplot as plt
-import torch
+import random
 import torch.nn as nn
 import torch.distributions as td
-import torch.utils.data
-from tqdm import tqdm
-from copy import deepcopy
-import os
-import math
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-import torch.optim as optim
 import networkx as nx
-import random
 
 # %% Interactive plots
 plt.ion() # Enable interactive plotting
@@ -44,31 +33,58 @@ train_loader = DataLoader(train_dataset, batch_size=100)
 validation_loader = DataLoader(validation_dataset, batch_size=44)
 test_loader = DataLoader(test_dataset, batch_size=44)
 
-# %% Define a simple graph convolution for graph classification
-class SimpleGraphConv(torch.nn.Module):
-    """Simple graph convolution for graph classification
+### Question C.1
+# data_batch = next(iter(train_loader))
+# print(data_batch.x)
+# print(data_batch.x.shape)
+# print(data_batch.edge_index)
+# print(data_batch.edge_index.shape)
+# print(data_batch.batch)
+# print(data_batch.batch.shape)
+# exit() # exit() to avoid running the rest of the code before answering question C.1
+
+# %% Define a simple GNN for graph classification
+class SimpleGNN(torch.nn.Module):
+    """Simple graph neural network for graph classification
 
     Keyword Arguments
     -----------------
         node_feature_dim : Dimension of the node features
-        filter_length : Length of convolution filter
+        state_dim : Dimension of the node states
+        num_message_passing_rounds : Number of message passing rounds
     """
 
-    def __init__(self, node_feature_dim, filter_length):
+    def __init__(self, node_feature_dim, state_dim, num_message_passing_rounds, latent_dim):
         super().__init__()
 
         # Define dimensions and other hyperparameters
         self.node_feature_dim = node_feature_dim
-        self.filter_length = filter_length
+        self.state_dim = state_dim
+        self.num_message_passing_rounds = num_message_passing_rounds
+        self.latent_dim = latent_dim
 
-        # Define graph filter
-        self.h = torch.nn.Parameter(1e-5*torch.randn(filter_length))
-        self.h.data[0] = 1.
+        # Input network
+        self.input_net = torch.nn.Sequential(
+            torch.nn.Linear(self.node_feature_dim, self.state_dim),
+            torch.nn.ReLU()
+            )
+
+        # Message networks
+        self.message_net = torch.nn.ModuleList([
+            torch.nn.Sequential(
+                torch.nn.Linear(self.state_dim, self.state_dim),
+                torch.nn.ReLU()
+            ) for _ in range(num_message_passing_rounds)])
+
+        # Update network
+        self.update_net = torch.nn.ModuleList([
+            torch.nn.Sequential(
+                torch.nn.Linear(self.state_dim, self.state_dim),
+                torch.nn.ReLU()
+            ) for _ in range(num_message_passing_rounds)])
 
         # State output network
-        self.output_net = torch.nn.Linear(self.node_feature_dim, 1)
-
-        self.cached = False
+        self.output_net = torch.nn.Linear(self.state_dim, 2*latent_dim)
 
     def forward(self, x, edge_index, batch):
         """Evaluate neural network on a batch of graphs.
@@ -90,32 +106,30 @@ class SimpleGraphConv(torch.nn.Module):
         """
         # Extract number of nodes and graphs
         num_graphs = batch.max()+1
+        num_nodes = batch.shape[0]
 
-        # Compute adjacency matrices and node features per graph
-        A = to_dense_adj(edge_index, batch)
-        X, idx = to_dense_batch(x, batch)
- 
-        # ---------------------------------------------------------------------------------------------------------
+        # Initialize node state from node features
+        state = self.input_net(x)
+        # state = x.new_zeros([num_nodes, self.state_dim]) # Uncomment to disable the use of node features
 
-        # Implementation in vertex domain
-        node_state = torch.zeros_like(X)
-        for k in range(self.filter_length):
-            node_state += self.h[k] * torch.linalg.matrix_power(A, k) @ X
+        # Loop over message passing rounds
+        for r in range(self.num_message_passing_rounds):
+            # Compute outgoing messages
+            message = self.message_net[r](state)
 
-        # TODO: Comment out the above three lines, and re-implement the graph
-        #       convolution in the spectral domain. Check that the two 
-        #       implementations yield identical results
-        L, U = torch.linalg.eigh(A)        
-        exponentiated_L = L.unsqueeze(2).pow(torch.arange(self.filter_length, device=L.device))
-        diagonal_filter = (self.h[None,None] * exponentiated_L).sum(2, keepdim=True)
-        node_state = U @ (diagonal_filter * (U.transpose(1, 2) @ X))
-        # ---------------------------------------------------------------------------------------------------------
+            # Aggregate: Sum messages
+            aggregated = x.new_zeros((num_nodes, self.state_dim))
+            aggregated = aggregated.index_add(0, edge_index[1], message[edge_index[0]])
 
-        # Aggregate the node states
-        graph_state = node_state.sum(1)
+            # Update states
+            state = state + self.update_net[r](aggregated)
+
+        # Aggretate: Sum node features
+        graph_state = x.new_zeros((num_graphs, self.state_dim))
+        graph_state = torch.index_add(graph_state, 0, batch, state)
 
         # Output
-        out = self.output_net(graph_state).flatten()
+        out = self.output_net(graph_state)
         return out
 
 class GaussianPrior(nn.Module):
@@ -140,7 +154,6 @@ class GaussianPrior(nn.Module):
         prior: [torch.distributions.Distribution]
         """
         return td.Independent(td.Normal(loc=self.mean, scale=self.std), 1)
-
 
 class GaussianEncoder(nn.Module):
     def __init__(self, encoder_net):
@@ -167,7 +180,46 @@ class GaussianEncoder(nn.Module):
         mean, std = torch.chunk(self.encoder_net(x), 2, dim=-1)
         return td.Independent(td.Normal(loc=mean, scale=torch.exp(std)), 1)
 
+class GaussianDecoder(nn.Module):
+    def __init__(self, decoder_net):
+        super(GaussianDecoder, self).__init__()
+        self.decoder_net = decoder_net
+
+    def forward(self, z):
+        mean = self.decoder_net(z)
+        return td.Independent(td.Normal(loc=mean, scale=0.1*torch.ones_like(mean)), 2)
+
+class BernoulliDecoder(nn.Module):
+    def __init__(self, decoder_net):
+        super(BernoulliDecoder, self).__init__()
+        self.decoder_net = decoder_net
+
+    def forward(self, z):
+        logits = self.decoder_net(z)
+        return td.Independent(td.Bernoulli(logits=logits), 2)
+
+class VAE(torch.nn.Module):
+    def __init__(self, encoder_net, decoder_net, prior):
+        super(VAE, self).__init__()
+        self.encoder = GaussianEncoder(encoder_net)
+        self.decoder = GaussianDecoder(decoder_net)
+        self.prior = prior
+
+    def forward(self, x):
+        q = self.encoder(x)
+        z = q.rsample()
+        p = self.decoder(z)
+        return p, q, self.prior()
+    
+    def ELBO(self, x, edge_index, batch, A):
+        p, q, prior = self.forward(x)
+        log_pxz = p.log_prob(x)
+        kl_qp = td.kl_divergence(q, prior)
+        elbo = log_pxz - kl_qp
+        return elbo.mean()
+
 def erdos_renyi(train_dataset):
+    # Baseline based on Erdos-Renyi model
     # 1. Sampling with empirical distribution
     node_counts = [graph.num_nodes for graph in train_dataset]
     N = random.choice(node_counts)
@@ -183,18 +235,17 @@ def erdos_renyi(train_dataset):
 
     return G
 
-
 # %% Set up the model, loss, and optimizer etc.
 # Instantiate the model
-filter_length = 3
-torch.manual_seed(1)
-model = SimpleGraphConv(node_feature_dim, filter_length).to(device)
+state_dim = 16
+num_message_passing_rounds = 4
+model = SimpleGNN(node_feature_dim, state_dim, num_message_passing_rounds).to(device)
 
 # Loss function
 cross_entropy = torch.nn.BCEWithLogitsLoss()
 
 # Optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=1.)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
 
 # Learning rate scheduler
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.995)
@@ -248,7 +299,7 @@ for epoch in range(epochs):
         validation_accuracies.append(validation_accuracy)
 
         # Print stats and update plots
-        if (epoch+1)%50 == 0:
+        if (epoch+1)%10 == 0:
             print(f'Epoch {epoch+1}')
             print(f'- Learning rate   = {scheduler.get_last_lr()[0]:.1e}')
             print(f'- Train. accuracy = {train_accuracy:.3f}')
