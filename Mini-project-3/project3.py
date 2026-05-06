@@ -17,7 +17,7 @@ def drawnow():
     plt.gcf().canvas.flush_events()
 
 # %% Device
-device = 'cpu'
+device = 'gpu' if torch.cuda.is_available() else 'cpu'
 
 # %% Load the MUTAG dataset
 # Load data
@@ -240,6 +240,15 @@ def erdos_renyi(train_dataset):
 state_dim = 16
 num_message_passing_rounds = 4
 model = SimpleGNN(node_feature_dim, state_dim, num_message_passing_rounds).to(device)
+
+latent_dim = 8
+hidden_dim = 64
+N_max = ...
+decoder_net = torch.nn.Sequential(
+    torch.nn.Linear(latent_dim, hidden_dim),
+    torch.nn.ReLU(),
+    torch.nn.Linear(hidden_dim, N_max*N_max)
+)
 
 # Loss function
 cross_entropy = torch.nn.BCEWithLogitsLoss()
