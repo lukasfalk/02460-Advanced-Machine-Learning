@@ -8,6 +8,7 @@ import random
 import torch.nn as nn
 import torch.distributions as td
 import networkx as nx
+from torch_geometric.utils import to_dense_adj, to_dense_batch
 
 # %% Interactive plots
 plt.ion() # Enable interactive plotting
@@ -17,7 +18,7 @@ def drawnow():
     plt.gcf().canvas.flush_events()
 
 # %% Device
-device = 'gpu' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # %% Load the MUTAG dataset
 # Load data
@@ -84,7 +85,7 @@ class SimpleGNN(torch.nn.Module):
             ) for _ in range(num_message_passing_rounds)])
 
         # State output network
-        self.output_net = torch.nn.Linear(self.state_dim, 2*latent_dim)
+        self.output_net = torch.nn.Linear(self.state_dim, 2*self.latent_dim)
 
     def forward(self, x, edge_index, batch):
         """Evaluate neural network on a batch of graphs.
@@ -169,7 +170,7 @@ class GaussianEncoder(nn.Module):
         super(GaussianEncoder, self).__init__()
         self.encoder_net = encoder_net
 
-    def forward(self, x, edge_index, batch, A):
+    def forward(self, x, edge_index, batch):
         """
         Given a batch of data, return a Gaussian distribution over the latent space.
 
@@ -177,7 +178,7 @@ class GaussianEncoder(nn.Module):
         x: [torch.Tensor]
            A tensor of dimension `(batch_size, feature_dim1, feature_dim2)`
         """
-        mean, std = torch.chunk(self.encoder_net(x), 2, dim=-1)
+        mean, std = torch.chunk(self.encoder_net(x, edge_index, batch), 2, dim=-1)
         return td.Independent(td.Normal(loc=mean, scale=torch.exp(std)), 1)
 
 class GaussianDecoder(nn.Module):
@@ -195,7 +196,7 @@ class BernoulliDecoder(nn.Module):
         self.decoder_net = decoder_net
 
     def forward(self, z):
-        logits = self.decoder_net(z)
+        logits = self.decoder_net(z).view(-1, N_max, N_max)
         return td.Independent(td.Bernoulli(logits=logits), 2)
 
 class VAE(torch.nn.Module):
@@ -205,14 +206,14 @@ class VAE(torch.nn.Module):
         self.decoder = BernoulliDecoder(decoder_net)
         self.prior = prior
 
-    def forward(self, x, edge_index, batch, A):
-        q = self.encoder(x, edge_index, batch, A)
+    def forward(self, x, edge_index, batch):
+        q = self.encoder(x, edge_index, batch)
         z = q.rsample()
         p = self.decoder(z)
         return p, q, self.prior()
     
     def ELBO(self, x, edge_index, batch, A):
-        p, q, prior = self.forward(x, edge_index, batch, A)
+        p, q, prior = self.forward(x, edge_index, batch)
         log_pxz = p.log_prob(A)
         kl_qp = td.kl_divergence(q, prior)
         elbo = log_pxz - kl_qp
@@ -225,8 +226,8 @@ def erdos_renyi(train_dataset):
     N = random.choice(node_counts)
 
     # 2. Compute link probabilities
-    graphs_with_N_nodes = [graph.num_edges // 2 for graph in train_dataset if graph.num_nodes == N]
-    edge_counts = sum([graph.num_edges for graph in graphs_with_N_nodes])
+    graphs_with_N_nodes = [graph for graph in train_dataset if graph.num_nodes == N]
+    edge_counts = sum([graph.num_edges for graph in graphs_with_N_nodes]) // 2
     total_possible_edges = N * (N - 1) // 2
     r = edge_counts / total_possible_edges
 
@@ -239,22 +240,21 @@ def erdos_renyi(train_dataset):
 # Instantiate the model
 state_dim = 16
 num_message_passing_rounds = 4
-model = SimpleGNN(node_feature_dim, state_dim, num_message_passing_rounds).to(device)
-
 latent_dim = 8
+model = SimpleGNN(node_feature_dim, state_dim, num_message_passing_rounds, latent_dim).to(device)
+
 hidden_dim = 64
-N_max = ...
+N_max = max(graph.num_nodes for graph in dataset)
 decoder_net = torch.nn.Sequential(
     torch.nn.Linear(latent_dim, hidden_dim),
     torch.nn.ReLU(),
     torch.nn.Linear(hidden_dim, N_max*N_max)
 )
 
-# Loss function
-cross_entropy = torch.nn.BCEWithLogitsLoss()
+vae = VAE(model, decoder_net, GaussianPrior(latent_dim)).to(device)
 
 # Optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+optimizer = torch.optim.Adam(vae.parameters(), lr=1e-3)
 
 # Learning rate scheduler
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.995)
@@ -265,78 +265,45 @@ train_losses = []
 validation_accuracies = []
 validation_losses = []
 
+losses = []
+
 # %% Fit the model
 # Number of epochs
 epochs = 500
 
 for epoch in range(epochs):
     # Loop over training batches
-    model.train()
-    train_accuracy = 0.
-    train_loss = 0.
+    vae.train()
     for data in train_loader:
-        out = model(data.x, data.edge_index, batch=data.batch)
-        loss = cross_entropy(out, data.y.float())
+        # out = model(data.x, data.edge_index, batch=data.batch)
+        # loss = cross_entropy(out, data.y.float())
+        num_graphs = data.batch.max()+1
 
+        # Compute adjacency matrices and node features per graph
+        A = to_dense_adj(data.edge_index, data.batch, max_num_nodes=N_max).float()
+        # X, idx = to_dense_batch(data.x, data.batch)
+        loss = -vae.ELBO(data.x, data.edge_index, batch=data.batch, A=A)
+        losses.append(loss.item())
         # Gradient step
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # Compute training loss and accuracy
-        train_accuracy += sum((out>0) == data.y).detach().cpu() / len(train_loader.dataset)
-        train_loss += loss.detach().cpu().item() * data.batch_size / len(train_loader.dataset)
-    
+
     # Learning rate scheduler step
     scheduler.step()
 
-    # Validation, print and plots
-    with torch.no_grad():    
-        model.eval()
-        # Compute validation loss and accuracy
-        validation_loss = 0.
-        validation_accuracy = 0.
-        for data in validation_loader:
-            out = model(data.x, data.edge_index, data.batch)
-            validation_accuracy += sum((out>0) == data.y).cpu() / len(validation_loader.dataset)
-            validation_loss += cross_entropy(out, data.y.float()).cpu().item() * data.batch_size / len(validation_loader.dataset)
-
-        # Store the training and validation accuracy and loss for plotting
-        train_accuracies.append(train_accuracy)
-        train_losses.append(train_loss)
-        validation_losses.append(validation_loss)
-        validation_accuracies.append(validation_accuracy)
-
-        # Print stats and update plots
-        if (epoch+1)%10 == 0:
-            print(f'Epoch {epoch+1}')
-            print(f'- Learning rate   = {scheduler.get_last_lr()[0]:.1e}')
-            print(f'- Train. accuracy = {train_accuracy:.3f}')
-            print(f'         loss     = {train_loss:.3f}')
-            print(f'- Valid. accuracy = {validation_accuracy:.3f}')
-            print(f'         loss     = {validation_loss:.3f}')
-
-            plt.figure('Loss').clf()
-            plt.plot(train_losses, label='Train')
-            plt.plot(validation_losses, label='Validation')
-            plt.legend()
-            plt.xlabel('Epoch')
-            plt.ylabel('Cross entropy')
-            plt.yscale('log')
-            plt.tight_layout()
-            drawnow()
-
-            plt.figure('Accuracy').clf()
-            plt.plot(train_accuracies, label='Train')
-            plt.plot(validation_accuracies, label='Validation')
-            plt.legend()
-            plt.xlabel('Epoch')
-            plt.ylabel('Accuracy')
-            plt.tight_layout()
-            drawnow()
+    if (epoch+1) % 10 == 0:
+        print(f'Epoch {epoch+1}, Loss: {losses[-1]:.3f}')
+        plt.figure('Loss').clf()
+        plt.plot(losses)
+        plt.xlabel('Batch')
+        plt.ylabel('ELBO')
+        plt.tight_layout()
+        drawnow()
 
 # %% Save final predictions.
 with torch.no_grad():
     data = next(iter(test_loader))
-    out = model(data.x, data.edge_index, data.batch).cpu()
+    out = vae.decoder(vae.encoder(data.x, data.edge_index, data.batch).rsample())
     torch.save(out, 'test_predictions.pt')
