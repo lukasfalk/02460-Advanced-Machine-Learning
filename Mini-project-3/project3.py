@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.distributions as td
 import networkx as nx
 from torch_geometric.utils import to_dense_adj, to_dense_batch
+import numpy as np
 
 # %% Interactive plots
 plt.ion() # Enable interactive plotting
@@ -33,16 +34,6 @@ train_dataset, validation_dataset, test_dataset = random_split(dataset, (100, 44
 train_loader = DataLoader(train_dataset, batch_size=100)
 validation_loader = DataLoader(validation_dataset, batch_size=44)
 test_loader = DataLoader(test_dataset, batch_size=44)
-
-### Question C.1
-# data_batch = next(iter(train_loader))
-# print(data_batch.x)
-# print(data_batch.x.shape)
-# print(data_batch.edge_index)
-# print(data_batch.edge_index.shape)
-# print(data_batch.batch)
-# print(data_batch.batch.shape)
-# exit() # exit() to avoid running the rest of the code before answering question C.1
 
 # %% Define a simple GNN for graph classification
 class SimpleGNN(torch.nn.Module):
@@ -181,15 +172,6 @@ class GaussianEncoder(nn.Module):
         mean, std = torch.chunk(self.encoder_net(x, edge_index, batch), 2, dim=-1)
         return td.Independent(td.Normal(loc=mean, scale=torch.exp(std)), 1)
 
-class GaussianDecoder(nn.Module):
-    def __init__(self, decoder_net):
-        super(GaussianDecoder, self).__init__()
-        self.decoder_net = decoder_net
-
-    def forward(self, z):
-        mean = self.decoder_net(z)
-        return td.Independent(td.Normal(loc=mean, scale=0.1*torch.ones_like(mean)), 2)
-
 class BernoulliDecoder(nn.Module):
     def __init__(self, decoder_net):
         super(BernoulliDecoder, self).__init__()
@@ -212,11 +194,11 @@ class VAE(torch.nn.Module):
         p = self.decoder(z)
         return p, q, self.prior()
     
-    def ELBO(self, x, edge_index, batch, A):
+    def ELBO(self, x, edge_index, batch, A, mask, kl_weight):
         p, q, prior = self.forward(x, edge_index, batch)
-        log_pxz = p.log_prob(A)
+        log_pxz = (p.base_dist.log_prob(A) * mask).sum(dim=[-1,-2]) / mask.sum(dim=[-1,-2])
         kl_qp = td.kl_divergence(q, prior)
-        elbo = log_pxz - kl_qp
+        elbo = log_pxz - kl_weight * kl_qp
         return elbo.mean()
 
 def erdos_renyi(train_dataset):
@@ -240,7 +222,7 @@ def erdos_renyi(train_dataset):
 # Instantiate the model
 state_dim = 16
 num_message_passing_rounds = 4
-latent_dim = 8
+latent_dim = 2
 model = SimpleGNN(node_feature_dim, state_dim, num_message_passing_rounds, latent_dim).to(device)
 
 hidden_dim = 64
@@ -253,57 +235,135 @@ decoder_net = torch.nn.Sequential(
 
 vae = VAE(model, decoder_net, GaussianPrior(latent_dim)).to(device)
 
-# Optimizer
 optimizer = torch.optim.Adam(vae.parameters(), lr=1e-3)
 
-# Learning rate scheduler
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.995)
 
-# %% Lists to store accuracy and loss
-train_accuracies = []
-train_losses = []
-validation_accuracies = []
-validation_losses = []
+elbos = []
 
-losses = []
-
-# %% Fit the model
-# Number of epochs
-epochs = 500
+epochs = 1000
 
 for epoch in range(epochs):
     # Loop over training batches
     vae.train()
     for data in train_loader:
-        # out = model(data.x, data.edge_index, batch=data.batch)
-        # loss = cross_entropy(out, data.y.float())
         num_graphs = data.batch.max()+1
 
         # Compute adjacency matrices and node features per graph
         A = to_dense_adj(data.edge_index, data.batch, max_num_nodes=N_max).float()
-        # X, idx = to_dense_batch(data.x, data.batch)
-        loss = -vae.ELBO(data.x, data.edge_index, batch=data.batch, A=A)
-        losses.append(loss.item())
+        kl_weight = min(1.0, epoch/400)
+        X, node_mask = to_dense_batch(data.x, data.batch, max_num_nodes=N_max)
+        edge_mask = node_mask.unsqueeze(2) * node_mask.unsqueeze(1)
+
+        loss = -vae.ELBO(data.x, data.edge_index, data.batch, A, edge_mask, kl_weight)
+        elbos.append(loss.item())
         # Gradient step
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-
-    # Learning rate scheduler step
     scheduler.step()
 
+    # Plot the training
     if (epoch+1) % 10 == 0:
-        print(f'Epoch {epoch+1}, Loss: {losses[-1]:.3f}')
-        plt.figure('Loss').clf()
-        plt.plot(losses)
+        print(f'Epoch {epoch+1}, ELBO: {elbos[-1]:.3f}')
+        plt.figure('ELBO').clf()
+        plt.plot(elbos)
         plt.xlabel('Batch')
         plt.ylabel('ELBO')
         plt.tight_layout()
         drawnow()
 
-# %% Save final predictions.
+plt.figure(figsize=(8, 4))
+plt.plot(elbos)
+plt.xlabel('Batch')
+plt.ylabel('ELBO')
+plt.tight_layout()
+plt.savefig('elbos.png', dpi=150)
+plt.clf()
+
+def adj_to_nx(A):
+    G = nx.from_numpy_array(A.cpu().numpy())
+    return G
+
+def compute_metrics(graphs):
+    hashes = [nx.weisfeiler_lehman_graph_hash(graph) for graph in graphs]
+    novel = [h not in train_hashes for h in hashes]
+    unique = [hashes.count(h) == 1 for h in hashes]
+    nov_and_uniq = [n and u for n, u in zip(novel, unique)]
+    return sum(novel)/len(novel), sum(unique)/len(unique), sum(nov_and_uniq)/len(nov_and_uniq)
+
+def get_graph_stats(graphs):
+    degrees, clusterings, centralities = [], [], []
+    for graph in graphs:
+        if graph.number_of_nodes() == 0:
+            continue
+        degrees += [d for _, d in graph.degree()]
+        clusterings += list(nx.clustering(graph).values())
+        try:
+            cent = nx.eigenvector_centrality(graph, max_iter=1000)
+            centralities += list(cent.values())
+        except:
+            centralities += [0.0] * graph.number_of_nodes()
+    return degrees, clusterings, centralities
+
+def sample_vae_graph(vae, node_counts):
+    N = random.choice(node_counts)
+    z = vae.prior().sample((1,))
+    A = vae.decoder(z).sample()[0, :N, :N]
+    A = torch.triu(A, diagonal=1)
+    A = A + A.T
+    return adj_to_nx(A)
+
+node_counts = [graph.num_nodes for graph in train_dataset]
 with torch.no_grad():
-    data = next(iter(test_loader))
-    out = vae.decoder(vae.encoder(data.x, data.edge_index, data.batch).rsample())
-    torch.save(out, 'test_predictions.pt')
+    # Sampling
+    baseline_samples = [erdos_renyi(train_dataset) for _ in range(1000)]
+    vae_graphs = [sample_vae_graph(vae, node_counts) for _ in range(1000)]
+
+    # Novelty and uniqueness
+    train_hashes = set(
+        nx.weisfeiler_lehman_graph_hash(adj_to_nx(
+            to_dense_adj(g.edge_index)[0]
+        )) for g in train_dataset
+    )
+
+    baseline_novel, baseline_unique, baseline_both = compute_metrics(baseline_samples)
+    vae_novel, vae_unique, vae_both = compute_metrics(vae_graphs)
+
+    print(f"Baseline:  Novel={baseline_novel:.1%}, Unique={baseline_unique:.1%}, Both={baseline_both:.1%}")
+    print(f"VAE:       Novel={vae_novel:.1%}, Unique={vae_unique:.1%}, Both={vae_both:.1%}")
+
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+    for i, ax in enumerate(axes.flat):
+        nx.draw(vae_graphs[i], ax=ax, node_size=50, with_labels=False)
+        ax.set_title(f'Graph {i}')
+    plt.tight_layout()
+    plt.savefig('vae_graphs.png', dpi=150)
+
+    ## Plotting histograms
+    # Train graphs for comparison
+    train_graphs = [adj_to_nx(to_dense_adj(g.edge_index, max_num_nodes=N_max)[0]) for g in train_dataset]
+
+    # Graph stats
+    train_stats = get_graph_stats(train_graphs)
+    baseline_stats = get_graph_stats(baseline_samples)
+    vae_stats = get_graph_stats(vae_graphs)
+
+    labels = ['Node Degree', 'Clustering Coefficient', 'Eigenvector Centrality']
+    bins_list = [np.linspace(0, 28, 30), np.linspace(0, 1, 30), np.linspace(0, 1, 30)]
+    row_labels = ['Train', 'Baseline', 'VAE']
+    all_stats = [train_stats, baseline_stats, vae_stats]
+
+    fig, axes = plt.subplots(3, 3, figsize=(10, 8))
+    for col, (metric_label, bins) in enumerate(zip(labels, bins_list)):
+        for row, (stats, row_label) in enumerate(zip(all_stats, row_labels)):
+            ax = axes[row, col]
+            ax.hist(stats[col], bins=bins, density=True, color='steelblue', edgecolor='white', linewidth=0.3)
+            if row == 0:
+                ax.set_title(metric_label, fontsize=11)
+            if col == 0:
+                ax.set_ylabel(row_label, fontsize=11)
+    plt.tight_layout()
+    plt.savefig('histograms.png', dpi=150)
+    plt.show()

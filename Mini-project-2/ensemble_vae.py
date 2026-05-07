@@ -111,7 +111,6 @@ class VAE(nn.Module):
         encoder: [torch.nn.Module]
                 The encoder distribution over the latent space.
         """
-
         super(VAE, self).__init__()
         self.prior = prior
         self.decoder = decoder
